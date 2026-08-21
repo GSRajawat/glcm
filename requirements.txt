@@ -1,8 +1,0 @@
-streamlit>=1.38
-supabase>=2.6
-bcrypt>=4.1
-pymupdf>=1.24
-pandas>=2.2
-openpyxl>=3.1
-reportlab>=4.0
-pypdf>=4.0
