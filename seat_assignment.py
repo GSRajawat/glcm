@@ -11,6 +11,7 @@ writes to assigned_seats scoped by center_id.
 import streamlit as st
 
 import db
+import auto_seat_planner
 
 
 def generate_sequential_seats(seat_range_str: str, num_students: int) -> list:
@@ -55,15 +56,34 @@ def _get_scheduled_papers(center_id: str, date_iso: str, shift: str) -> list:
     return rows
 
 
-def _get_roll_numbers_for_paper(center_id: str, paper_code: str) -> list:
+def _get_students_for_paper(center_id: str, paper_code: str) -> dict:
+    """
+    Returns {roll_number: {"class": ..., "mode": ..., "type": ...}}.
+
+    A single paper_code can legitimately span several student cohorts
+    (Regular / EX / ATKT etc.) ingested from separate sitting-plan PDFs —
+    each sitting_plan row's raw_row carries the class/mode/type that
+    applies to ITS chunk of roll numbers, which is the only place this
+    per-student distinction survives. (The shared `timetable` row for
+    this paper_code is one scheduling record for the whole session, and
+    is NOT reliable for per-student mode/type.)
+    """
     ok, rows = db.select("sitting_plan", center_id, {"paper_code": paper_code})
     if not ok:
         st.error(rows)
-        return []
-    all_rolls = []
+        return {}
+    students = {}
     for row in rows:
-        all_rolls.extend(row.get("roll_numbers") or [])
-    return sorted(set(all_rolls))
+        raw = row.get("raw_row") or {}
+        info = {"class": raw.get("class", ""), "mode": raw.get("mode", ""), "type": raw.get("type", "")}
+        for roll in (row.get("roll_numbers") or []):
+            students[roll] = info
+    return students
+
+
+def _get_roll_numbers_for_paper(center_id: str, paper_code: str) -> list:
+    """Flat sorted roll number list — kept for callers that just need counts/membership."""
+    return sorted(_get_students_for_paper(center_id, paper_code).keys())
 
 
 def _get_assigned_for_paper_session(center_id: str, paper_code: str, date_iso: str, shift: str) -> list:
@@ -116,7 +136,8 @@ def assign_seats(center_id: str, date_iso: str, shift: str, paper_code: str,
     """
     Returns (success, message, newly_assigned_rows).
     """
-    all_rolls = _get_roll_numbers_for_paper(center_id, paper_code)
+    student_info = _get_students_for_paper(center_id, paper_code)
+    all_rolls = sorted(student_info.keys())
     if not all_rolls:
         return False, f"No students found in sitting plan for paper {paper_code}.", []
 
@@ -168,10 +189,14 @@ def assign_seats(center_id: str, date_iso: str, shift: str, paper_code: str,
     new_rows = []
     for i, roll in enumerate(students_to_assign):
         seat_num_str = f"{available_seat_numbers[i]}{suffix}"
+        info = student_info.get(roll, {})
         new_rows.append({
             "roll_number": roll,
             "paper_code": paper_code,
             "paper_name": paper_name,
+            "class": info.get("class", ""),
+            "mode": info.get("mode", ""),
+            "type": info.get("type", ""),
             "room_number": room,
             "seat_number": seat_num_str,
             "date": date_iso,
@@ -198,6 +223,12 @@ def assign_seats(center_id: str, date_iso: str, shift: str, paper_code: str,
 def render(center_id: str):
     st.subheader("📘 Room & Seat Assignment Tool")
 
+    mode = st.radio(
+        "Mode:", ["Manual (one paper/room at a time)", "Auto-Propose (whole shift)"],
+        key="seat_assignment_mode", horizontal=True,
+    )
+    st.markdown("---")
+
     ok, timetable_rows = db.select("timetable", center_id)
     if not ok:
         st.error(timetable_rows)
@@ -216,6 +247,10 @@ def render(center_id: str):
 
     shift_options = sorted({r["shift"] for r in scheduled if r["date"] == date_iso})
     shift = st.selectbox("Select shift", shift_options, key="assign_shift_select")
+
+    if mode == "Auto-Propose (whole shift)":
+        render_auto_propose(center_id, date_iso, shift)
+        return
 
     st.markdown("---")
     st.subheader("Session Student Summary (Assigned vs. Unassigned)")
@@ -287,3 +322,81 @@ def render(center_id: str):
             st.dataframe(new_rows, use_container_width=True)
         else:
             st.error(message) if "already assigned" not in message else st.warning(message)
+
+
+# ---------------------------------------------------------------------------
+# Auto-Propose (whole shift)
+# ---------------------------------------------------------------------------
+
+def render_auto_propose(center_id: str, date_iso: str, shift: str):
+    st.subheader("🪄 Auto-Propose Seating for This Shift")
+    st.info(
+        "Generates a seating proposal for every unassigned student across "
+        "all papers this shift, using your uploaded Room Capacity Sheet "
+        "(Admin \u2192 Upload Data Files). Tries the most spacious ('easy') "
+        "tier first, only doubling up students where the room capacity "
+        "actually requires it. **This is only a draft** \u2014 review and "
+        "edit it below, then confirm to write it into Assigned Seats."
+    )
+
+    ok, rooms = db.select("room_capacities", center_id)
+    if not ok or not rooms:
+        st.warning("No Room Capacity Sheet uploaded yet for this center. Upload one via Admin \u2192 Upload Data Files first.")
+        return
+
+    state_key = f"auto_propose_{date_iso}_{shift}"
+
+    if st.button("Generate Proposal"):
+        with st.spinner("Working out the best seating arrangement..."):
+            result = auto_seat_planner.propose_seating(center_id, date_iso, shift)
+        st.session_state[state_key] = result
+
+    result = st.session_state.get(state_key)
+    if not result:
+        return
+
+    if result.get("error"):
+        st.error(result["error"])
+        return
+
+    if result["total_demand"] == 0:
+        st.success("Every student for this shift already has a seat assigned.")
+        return
+
+    tier_labels = {"easy": "🟢 Easy (1 per table)", "normal": "🟡 Normal (2 per table, same subject)", "tight": "🔴 Tight (2 per table, mixed subjects)"}
+    st.write(f"**Tier used:** {tier_labels.get(result['tier_used'], result['tier_used'])}")
+    st.write(f"**Students needing seats:** {result['total_demand']}  |  **Proposed:** {len(result['assignments'])}  |  **Unplaced:** {result['unplaced_count']}")
+
+    if result["unplaced_count"] > 0:
+        st.warning(
+            f"{result['unplaced_count']} student(s) could not be placed even at the tightest "
+            f"tier your uploaded room capacities allow: {', '.join(result['unplaced_rolls'][:20])}"
+            + ("..." if result["unplaced_count"] > 20 else "")
+        )
+
+    st.markdown("---")
+    st.write("**Review and edit the proposal below** \u2014 nothing is saved yet.")
+
+    edited = st.data_editor(
+        result["assignments"], use_container_width=True, num_rows="dynamic",
+        key=f"editor_{state_key}",
+        column_config={
+            "date": None, "shift": None,  # hide, not editable — fixed for this proposal
+        },
+    )
+
+    if st.button("✅ Confirm & Finalize These Assignments", key=f"confirm_{state_key}"):
+        rows_to_save = [
+            {"roll_number": r["roll_number"], "paper_code": r["paper_code"], "paper_name": r["paper_name"],
+             "room_number": r["room_number"], "seat_number": r["seat_number"], "date": date_iso, "shift": shift}
+            for r in edited
+        ]
+        ok, save_result = db.upsert(
+            "assigned_seats", center_id, rows_to_save,
+            on_conflict="center_id,roll_number,date,shift,paper_code",
+        )
+        if ok:
+            st.success(f"Finalized {len(rows_to_save)} seat assignment(s). You can now generate Room Charts for this shift.")
+            del st.session_state[state_key]
+        else:
+            st.error(save_result)

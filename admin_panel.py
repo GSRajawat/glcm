@@ -16,6 +16,7 @@ import streamlit as st
 
 import data_ingestion
 import seat_assignment
+import auto_seat_planner
 import reporting
 import remuneration
 import db
@@ -113,7 +114,8 @@ def render(center_id: str):
 
     admin_option = st.radio(
         "Select Admin Task:",
-        ["Upload Data Files", "Update Timetable Details", "Assign Rooms & Seats to Students", "Reports", "Remuneration Bill Generation"],
+        ["Upload Data Files", "Update Timetable Details", "Assign Rooms & Seats to Students",
+         "Auto-Propose Seating", "Reports", "Remuneration Bill Generation"],
         key="admin_task_radio",
     )
 
@@ -125,6 +127,8 @@ def render(center_id: str):
         render_update_timetable(center_id)
     elif admin_option == "Assign Rooms & Seats to Students":
         seat_assignment.render(center_id)
+    elif admin_option == "Auto-Propose Seating":
+        auto_seat_planner.render(center_id)
     elif admin_option == "Reports":
         reporting.render(center_id)
     elif admin_option == "Remuneration Bill Generation":

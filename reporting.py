@@ -5,6 +5,7 @@ and CS panels — both call render(center_id).
 """
 
 import datetime
+import io
 import re
 from collections import defaultdict
 
@@ -146,9 +147,9 @@ def generate_room_chart_report(center_id: str, date_str: str, shift: str) -> str
 
     for s in seats:
         tt = tt_by_paper_code.get(s["paper_code"], {})
-        s["_class"] = tt.get("class", "")
-        s["_mode"] = tt.get("mode") or "REGULAR"
-        s["_type"] = tt.get("type") or "REGULAR"
+        s["_class"] = s.get("class") or tt.get("class", "")
+        s["_mode"] = s.get("mode") or tt.get("mode") or "REGULAR"
+        s["_type"] = s.get("type") or tt.get("type") or "REGULAR"
         s["_paper_name"] = tt.get("paper_name") or s.get("paper_name") or ""
 
     by_room = defaultdict(list)
@@ -162,11 +163,15 @@ def generate_room_chart_report(center_id: str, date_str: str, shift: str) -> str
 
         seen_papers = set()
         for s in room_data:
-            key = (s["_class"], s["paper_code"], s["_paper_name"])
+            key = (s["_class"], s["paper_code"], s["_mode"], s["_type"], s["_paper_name"])
             if key in seen_papers:
                 continue
             seen_papers.add(key)
-            count_for_paper = sum(1 for x in room_data if x["paper_code"] == s["paper_code"] and x["_paper_name"] == s["_paper_name"])
+            count_for_paper = sum(
+                1 for x in room_data
+                if x["paper_code"] == s["paper_code"] and x["_paper_name"] == s["_paper_name"]
+                and x["_mode"] == s["_mode"] and x["_type"] == s["_type"]
+            )
             parts.append(
                 "Name of Exam (Class - mode - Type),,,Paper  (paper- paper code - paper name),,,,Answer Sheets (number of students),,\n"
                 ",,,,,,,Received  ,Used  ,Balance   \n"
@@ -189,9 +194,214 @@ def generate_room_chart_report(center_id: str, date_str: str, shift: str) -> str
         if line_students:
             parts.append(",".join(line_students) + "\n")
 
+        parts.append(_absent_ufm_block(center_id, room_num, date_str, shift, room_data))
         parts.append("\n")
 
     return "".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Room Chart Report — PDF version
+# ---------------------------------------------------------------------------
+
+def generate_room_chart_pdf(center_id: str, date_str: str, shift: str) -> bytes:
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib import colors
+    from reportlab.lib.units import inch
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_CENTER
+
+    ok, tt_rows = db.select("timetable", center_id, {"date": date_str, "shift": shift})
+    if not ok or not tt_rows:
+        return b""
+
+    exam_time = tt_rows[0].get("time_slot") or ""
+    unique_classes = sorted({t.get("class") for t in tt_rows if t.get("class")})
+    if len(unique_classes) == 1:
+        class_summary_header = f"{unique_classes[0]} Examination {datetime.datetime.now().year}"
+    elif len(unique_classes) > 1:
+        class_summary_header = f"Various Classes Examination {datetime.datetime.now().year}"
+    else:
+        class_summary_header = f"Examination {datetime.datetime.now().year}"
+
+    tt_by_paper_code = {t["paper_code"]: t for t in tt_rows}
+
+    ok_c, center_info = db.get_center_info(center_id)
+    university_name = center_info.get("university_name", "").upper() if ok_c else ""
+    center_name = center_info.get("center_name", "") if ok_c else ""
+    center_code = center_info.get("center_code", "") if ok_c else ""
+
+    ok, seats = db.select("assigned_seats", center_id, {"date": date_str, "shift": shift})
+    if not ok or not seats:
+        return b""
+
+    for s in seats:
+        tt = tt_by_paper_code.get(s["paper_code"], {})
+        s["_class"] = s.get("class") or tt.get("class", "")
+        s["_mode"] = s.get("mode") or tt.get("mode") or "REGULAR"
+        s["_type"] = s.get("type") or tt.get("type") or "REGULAR"
+        s["_paper_name"] = tt.get("paper_name") or s.get("paper_name") or ""
+
+    by_room = defaultdict(list)
+    for s in seats:
+        by_room[s["room_number"]].append(s)
+
+    styles = getSampleStyleSheet()
+    center_style = ParagraphStyle("center", parent=styles["Normal"], alignment=TA_CENTER)
+    title_style = ParagraphStyle("title", parent=styles["Heading2"], alignment=TA_CENTER)
+    small = ParagraphStyle("small", parent=styles["Normal"], fontSize=7, leading=8)
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=letter, topMargin=0.4 * inch, bottomMargin=0.4 * inch,
+                             leftMargin=0.4 * inch, rightMargin=0.4 * inch)
+    story = []
+
+    room_keys = sorted(by_room.keys(), key=lambda r: (0, int(r)) if str(r).isdigit() else (1, str(r)))
+    for idx, room_num in enumerate(room_keys):
+        room_data = sorted(by_room[room_num], key=lambda s: _room_chart_seat_sort_key(s["seat_number"]))
+
+        story.append(Paragraph(university_name, title_style))
+        story.append(Paragraph(f"Examination Centre :- {center_name} Code :- {center_code}", center_style))
+        story.append(Paragraph(class_summary_header, center_style))
+        story.append(Paragraph(f"date :- {date_str}&nbsp;&nbsp;&nbsp; shift :- {shift}&nbsp;&nbsp;&nbsp; Time :- {exam_time}", center_style))
+        story.append(Spacer(1, 8))
+        story.append(Paragraph(f"Room :- {room_num}", title_style))
+        story.append(Spacer(1, 6))
+
+        seen_papers = set()
+        paper_rows = [["Name of Exam (Class - mode - Type)", "Paper", "Received", "Used", "Balance"]]
+        for s in room_data:
+            key = (s["_class"], s["paper_code"], s["_mode"], s["_type"], s["_paper_name"])
+            if key in seen_papers:
+                continue
+            seen_papers.add(key)
+            count_for_paper = sum(
+                1 for x in room_data
+                if x["paper_code"] == s["paper_code"] and x["_paper_name"] == s["_paper_name"]
+                and x["_mode"] == s["_mode"] and x["_type"] == s["_type"]
+            )
+            paper_rows.append([
+                f"{s['_class']} - {s['_mode']} - {s['_type']}",
+                f"{s['paper_code']} - {s['_paper_name']}",
+                str(count_for_paper), "", "",
+            ])
+        paper_table = Table(paper_rows, colWidths=[2.3 * inch, 3.0 * inch, 0.7 * inch, 0.6 * inch, 0.7 * inch])
+        paper_table.setStyle(TableStyle([
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+            ("FONTSIZE", (0, 0), (-1, -1), 7),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+        ]))
+        story.append(paper_table)
+        story.append(Spacer(1, 6))
+
+        roll_rows = []
+        row_buf = []
+        for s in room_data:
+            truncated = (s["_paper_name"] or "")[:16]
+            row_buf.append(f"{s['roll_number']}\n(R{room_num}-S{s['seat_number']})-{truncated}")
+            if len(row_buf) == 5:
+                roll_rows.append(row_buf)
+                row_buf = []
+        if row_buf:
+            while len(row_buf) < 5:
+                row_buf.append("")
+            roll_rows.append(row_buf)
+
+        if roll_rows:
+            roll_table = Table(roll_rows, colWidths=[1.46 * inch] * 5)
+            roll_table.setStyle(TableStyle([
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                ("FONTSIZE", (0, 0), (-1, -1), 6.5),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ]))
+            story.append(roll_table)
+            story.append(Spacer(1, 6))
+
+        absent_entries, ufm_entries, invigilators = _get_absent_ufm_data(center_id, room_num, date_str, shift, room_data)
+        au_rows = [["Absent Roll Number", "UFM Roll Number"]]
+        max_rows = max(len(absent_entries), len(ufm_entries), 1)
+        for i in range(max_rows):
+            a_roll = absent_entries[i][1] if i < len(absent_entries) else ""
+            u_roll = ufm_entries[i][1] if i < len(ufm_entries) else ""
+            au_rows.append([a_roll, u_roll])
+        au_rows.append([f"Total: {len(absent_entries)}", f"Total: {len(ufm_entries)}"])
+        au_table = Table(au_rows, colWidths=[3.65 * inch] * 2)
+        au_table.setStyle(TableStyle([
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+            ("FONTSIZE", (0, 0), (-1, -1), 7.5),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+            ("BACKGROUND", (0, -1), (-1, -1), colors.whitesmoke),
+        ]))
+        story.append(au_table)
+        story.append(Spacer(1, 6))
+
+        inv_rows_pdf = []
+        for i in range(3):
+            name = invigilators[i] if i < len(invigilators) else ""
+            inv_rows_pdf.append([f"{i + 1}. Name of Invigilator:", name, "Signature:", ""])
+        inv_table = Table(inv_rows_pdf, colWidths=[1.6 * inch, 2.05 * inch, 1.0 * inch, 2.6 * inch])
+        inv_table.setStyle(TableStyle([
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("LINEBELOW", (1, 0), (1, -1), 0.5, colors.black),
+            ("LINEBELOW", (3, 0), (3, -1), 0.5, colors.black),
+        ]))
+        story.append(inv_table)
+
+        if idx < len(room_keys) - 1:
+            from reportlab.platypus import PageBreak
+            story.append(PageBreak())
+
+    doc.build(story)
+    return buf.getvalue()
+
+
+def _get_absent_ufm_data(center_id: str, room_num: str, date_str: str, shift: str, room_data: list):
+    """Returns (absent_entries, ufm_entries, invigilators) for a room's
+    session — absent_entries/ufm_entries are [(paper_label, roll), ...],
+    pulled from cs_reports and room_invigilator_assignments."""
+    paper_codes_in_room = {s["paper_code"] for s in room_data}
+    ok, reports = db.select("cs_reports", center_id, {"room_num": room_num, "date": date_str, "shift": shift})
+    reports = [r for r in reports if r["paper_code"] in paper_codes_in_room] if ok else []
+
+    absent_entries, ufm_entries = [], []
+    for r in reports:
+        paper_label = r.get("paper_name") or r.get("paper_code") or ""
+        for roll in (r.get("absent_roll_numbers") or []):
+            absent_entries.append((paper_label, roll))
+        for roll in (r.get("ufm_roll_numbers") or []):
+            ufm_entries.append((paper_label, roll))
+
+    ok_i, inv_rows = db.select("room_invigilator_assignments", center_id, {"room_num": room_num, "date": date_str, "shift": shift})
+    invigilators = inv_rows[0].get("invigilators", []) if ok_i and inv_rows else []
+
+    return absent_entries, ufm_entries, invigilators
+
+
+def _absent_ufm_block(center_id: str, room_num: str, date_str: str, shift: str, room_data: list) -> str:
+    """Absent/UFM examinees table + invigilator signature lines, matching
+    the official room-chart layout — CSV-text version."""
+    absent_entries, ufm_entries, invigilators = _get_absent_ufm_data(center_id, room_num, date_str, shift, room_data)
+
+    lines = [
+        "Absent examinees,,,,,,UFM Examinees,,,\n",
+        "paper name,,Absent roll number,,,Total,UFM roll number and extra answer sheets,,,Total\n",
+    ]
+
+    max_rows = max(len(absent_entries), len(ufm_entries), 1)
+    for i in range(max_rows):
+        a_paper, a_roll = absent_entries[i] if i < len(absent_entries) else ("", "")
+        u_paper, u_roll = ufm_entries[i] if i < len(ufm_entries) else ("", "")
+        paper_col = a_paper or u_paper if i == 0 else ""
+        lines.append(f"{paper_col},,{a_roll},,,,{u_roll},,,\n")
+
+    lines.append(f"Total,,,,,{len(absent_entries)},Total,,,{len(ufm_entries)}\n")
+
+    for i in range(3):
+        name = invigilators[i] if i < len(invigilators) else ""
+        lines.append(f"{i + 1},Name of Invigilator,{name},,,,Signature,,,\n")
+
+    return "".join(lines)
 
 
 def render_room_chart(center_id: str):
@@ -218,10 +428,19 @@ def render_room_chart(center_id: str):
             st.error(output)
         else:
             st.text_area("Generated Room Chart", output, height=600)
-            st.download_button(
-                "Download Room Chart as CSV", data=output.encode("utf-8"),
-                file_name=f"room_chart_{sel_date}_{sel_shift}.csv", mime="text/csv",
-            )
+            col1, col2 = st.columns(2)
+            with col1:
+                st.download_button(
+                    "Download Room Chart as CSV", data=output.encode("utf-8"),
+                    file_name=f"room_chart_{sel_date}_{sel_shift}.csv", mime="text/csv",
+                )
+            with col2:
+                pdf_bytes = generate_room_chart_pdf(center_id, sel_date, sel_shift)
+                if pdf_bytes:
+                    st.download_button(
+                        "Download Room Chart as PDF", data=pdf_bytes,
+                        file_name=f"room_chart_{sel_date}_{sel_shift}.pdf", mime="application/pdf",
+                    )
 
 
 # ---------------------------------------------------------------------------

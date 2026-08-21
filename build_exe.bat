@@ -22,10 +22,9 @@ if not exist dist_protected (
 
 echo.
 echo ============================================
-echo Step 3: Copying .streamlit (secrets) and assets into protected build
+echo Step 3: Copying .streamlit (secrets) into protected build
 echo ============================================
 xcopy /E /I /Y .streamlit dist_protected\.streamlit
-xcopy /E /I /Y assets dist_protected\assets
 
 echo.
 echo ============================================
@@ -38,7 +37,6 @@ pyinstaller --onefile --name ExamManagementSystem ^
   --add-data "student_portal.py;." --add-data "owner_panel.py;." ^
   --add-data "data_ingestion.py;." --add-data "seat_assignment.py;." ^
   --add-data "reporting.py;." --add-data "remuneration.py;." ^
-  --add-data "assets;assets" ^
   --add-data ".streamlit;.streamlit" ^
   run_app.py
 

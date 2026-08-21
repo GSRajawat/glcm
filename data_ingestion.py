@@ -366,3 +366,99 @@ def render_upload_ui(center_id: str):
         with st.spinner("Processing attestation PDFs..."):
             ok, message = process_attestation_pdfs(center_id, attestation_zip)
         (st.success if ok else st.error)(message)
+
+    st.markdown("---")
+    st.markdown("**Room Capacity Sheet** (used by Auto-Propose Seating)")
+    st.caption(
+        "Columns expected: room no, Each table capacity, capacity (N), Type of "
+        "seats, can accommodate 2 students of same subjects, can accommodate 2 "
+        "students of different subjects, capacity in easy condition, capacity "
+        "in normal condition, capacity in tight condition."
+    )
+    capacity_file = st.file_uploader(
+        "Upload Room Capacity (CSV or Excel)",
+        type=["csv", "xlsx", "xls"], key="upload_room_capacity_file",
+    )
+    if capacity_file and st.button("Process Room Capacity File"):
+        with st.spinner("Processing room capacity sheet..."):
+            ok, message = process_room_capacity_file(center_id, capacity_file)
+        (st.success if ok else st.error)(message)
+
+
+# ---------------------------------------------------------------------------
+# Room capacity sheet import
+# ---------------------------------------------------------------------------
+
+_CAPACITY_COLUMN_ALIASES = {
+    "room_no": ["room no", "room number", "room"],
+    "each_table_capacity": ["each table capacity", "table capacity"],
+    "capacity_n": ["capacity (n)", "capacity(n)", "capacity n"],
+    "seat_type": ["type of seats", "seat type"],
+    "accommodate_2_same": ["can accommodate 2 students of same subjects", "accommodate 2 same", "same subject"],
+    "accommodate_2_diff": ["can accommodate 2 students of different subjects", "accommodate 2 different", "different subject"],
+    "capacity_easy": ["capacity in easy condition", "easy condition", "easy"],
+    "capacity_normal": ["capacity in normal condition", "normal condition", "normal"],
+    "capacity_tight": ["capacity in tight condition (with different subjects only)", "capacity in tight condition", "tight condition", "tight"],
+}
+
+
+def _match_capacity_columns(columns: list) -> dict:
+    """Maps a DataFrame's actual column names to our canonical field names,
+    tolerant of case/whitespace/minor wording differences."""
+    normalized = {c: re.sub(r"\s+", " ", str(c).strip().lower()) for c in columns}
+    mapping = {}
+    for field, aliases in _CAPACITY_COLUMN_ALIASES.items():
+        for col, norm in normalized.items():
+            if any(norm == a or a in norm for a in aliases):
+                mapping[field] = col
+                break
+    return mapping
+
+
+def _to_bool(value) -> bool:
+    return str(value).strip().lower() in ("yes", "y", "true", "1")
+
+
+def process_room_capacity_file(center_id: str, uploaded_file) -> tuple[bool, str]:
+    import pandas as pd
+
+    try:
+        if uploaded_file.name.lower().endswith(".csv"):
+            df = pd.read_csv(uploaded_file)
+        else:
+            df = pd.read_excel(uploaded_file)
+    except Exception as e:
+        return False, f"Could not read the file: {e}"
+
+    col_map = _match_capacity_columns(list(df.columns))
+    required = ["room_no", "each_table_capacity", "capacity_n", "seat_type",
+                "capacity_easy", "capacity_normal", "capacity_tight"]
+    missing = [f for f in required if f not in col_map]
+    if missing:
+        return False, f"Could not find columns for: {', '.join(missing)}. Check the column headers match what's expected."
+
+    rows = []
+    for _, row in df.iterrows():
+        try:
+            rows.append({
+                "room_no": str(row[col_map["room_no"]]).strip(),
+                "each_table_capacity": int(row[col_map["each_table_capacity"]]),
+                "capacity_n": int(row[col_map["capacity_n"]]),
+                "seat_type": str(row[col_map["seat_type"]]).strip(),
+                "accommodate_2_same": _to_bool(row[col_map["accommodate_2_same"]]) if "accommodate_2_same" in col_map else False,
+                "accommodate_2_diff": _to_bool(row[col_map["accommodate_2_diff"]]) if "accommodate_2_diff" in col_map else False,
+                "capacity_easy": int(row[col_map["capacity_easy"]]),
+                "capacity_normal": int(row[col_map["capacity_normal"]]),
+                "capacity_tight": int(row[col_map["capacity_tight"]]),
+            })
+        except (ValueError, TypeError):
+            continue
+
+    if not rows:
+        return False, "No valid room rows found in the file."
+
+    ok, result = db.upsert("room_capacities", center_id, rows, on_conflict="center_id,room_no")
+    if not ok:
+        return False, result
+
+    return True, f"Imported capacity data for {len(rows)} room(s)."

@@ -76,9 +76,12 @@ def render_center_directory():
                     st.session_state[f"show_reset_{center['id']}"] = True
 
             if st.session_state.get(f"show_reset_{center['id']}"):
-                new_admin_pw = st.text_input("New Admin Password", type="password", key=f"new_admin_pw_{center['id']}")
-                new_cs_pw = st.text_input("New CS Password", type="password", key=f"new_cs_pw_{center['id']}")
-                if st.button("Confirm Reset", key=f"confirm_reset_{center['id']}"):
+                with st.form(f"reset_form_{center['id']}"):
+                    new_admin_pw = st.text_input("New Admin Password", type="password", key=f"new_admin_pw_{center['id']}")
+                    new_cs_pw = st.text_input("New CS Password", type="password", key=f"new_cs_pw_{center['id']}")
+                    confirm_clicked = st.form_submit_button("Confirm Reset")
+
+                if confirm_clicked:
                     updates = {}
                     if new_admin_pw:
                         updates["admin_password_hash"] = auth.hash_password(new_admin_pw)
