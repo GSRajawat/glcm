@@ -1,5 +1,0 @@
-room no, Each table capacity, capacity (N), Type of seats, can accommodate 2 students of same subjects, can accommodate 2 students of different subjects, capacity in easy condition, capacity in normal condition, capacity in tight condition
-free,1 or 2,free,single (1 to N)/ Double (1A to NA & 2B to NB),yes / no,yes /no,free,free,free
-3,2,60,single,no,yes,60,60,120
-4,1,60,single,no,no,60,60,60
-6,2,30,double,yes,yes,30,60,60
