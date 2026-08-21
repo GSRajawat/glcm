@@ -1,0 +1,24 @@
+# Render Blueprint for ShopOps Feedback App
+# Docs: https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: shopops-feedback
+    runtime: node
+    plan: free
+    region: singapore
+    branch: main
+    buildCommand: "NODE_OPTIONS='--max-old-space-size=1536' yarn install --frozen-lockfile && NODE_OPTIONS='--max-old-space-size=1536' yarn build"
+    startCommand: yarn start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: 20.18.0
+      - key: NEXT_TELEMETRY_DISABLED
+        value: "1"
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: NODE_ENV
+        value: production
